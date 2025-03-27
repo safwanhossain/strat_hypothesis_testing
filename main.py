@@ -100,7 +100,7 @@ def get_best_response(inst_dict, alpha, verbose=False):
         return True, n_opt
 
 
-def get_threshold_belief(inst_dict, alpha, eps=0.01, verbose=False):
+def get_threshold_belief(inst_dict, alpha, eps=0.005, verbose=False):
     """Get the threshold for a given baseline and p-value threshold
     """
     # discretize the belief space
@@ -129,39 +129,77 @@ def get_threshold_belief(inst_dict, alpha, eps=0.01, verbose=False):
         print(f"The utility at threshold belief is: {utility}") 
     return threshold, n_tau
 
+def get_alpha_star(inst_dict):
+    """ Compute the value of alpha such that mu_tau(alpha) = mu_b. Since mu_tau decreases as 
+        alpha increases, we can use binary search to find this value.
+    """
+    # discretize the p value space
+    alphas = np.linspace(0.001, 0.25, 200)
+
+    # also just do a linear search for now
+    left, right = 0, len(alphas)
+    mu_b = inst_dict["mu_b"]
+    while left <= right:
+        mid = left + math.ceil((right - left) // 2)
+        alpha_val = alphas[mid]
+        mu_tau, n_tau = get_threshold_belief(inst_dict, alpha_val)
+        if left == right:
+            break
+        if mu_tau > mu_b: 
+            left = mid + 1
+        else:
+            right = mid
+   
+    alpha_star = alphas[mid]
+    return alpha_star
 
 def get_loss(inst_dict, alpha):
     """ Plot the total loss as a function of the p-value alpha
     """
     # We shall consider the belief distribution to uniform between 
     # mu_b - 0.1 and mu_b + 0.2
-    mu_b = inst_dict["mu_b"]
-    left_unif, right_unif = 0.1, 0.2
-    
+    mu_b = inst_dict["mu_b"] 
+    left, right = 0.4, 0.7
+
+    def unif_cdf(mu_val):
+        return (min(mu_val, right) - left) / (right - left)
+
+    def unif_pdf(mu_0, cond=None):
+        if mu_0 <= left or mu_0 >= right:
+            return 0
+
+        if cond is None:
+            return 1 / (right - left) 
+        
+        if cond and cond[0] == "interval":
+            # compute P[mu_0 | left_int < mu_0 < right_int]
+            left_int, right_int = cond[1], cond[2]
+            if not left_int <= mu_0 <= right_int:
+                return 0
+            return 1 / (mu_b - max(left_int, left))
+        
+        if cond and cond[0] == "max":
+            # compute P[mu_0 | mu_0 >= max(val1, val2)]
+            max_val = max(cond[1], cond[2])
+            if max_val >= right or mu_0 <= max_val:
+                return 0
+            return 1 / (right - max_val)  
+
     def conditional_prob(mu_0, mu_tau, cond, arg):
         inst_dict_copy = copy.deepcopy(inst_dict)
         inst_dict_copy["mu_0"] = mu_0
-        if mu_0 <= mu_b - left_unif or mu_0 >= mu_b + right_unif:
+        if unif_pdf(mu_0) == 0:
             return 0
-        
-        if cond == "interval":
-            # We want to compute P[mu_0 | mu_tau < mu_0 < mu_b]
-            if mu_tau >= mu_b:
-                return 0
-            if not mu_tau <= mu_0 <= mu_b:
-                return 0
-            # Guaranteed that mu_tau <= mu_0 <= mu_b 
-            val = 1 / (mu_b - max(mu_tau, mu_b - left_unif))
+       
+        if cond == "interval": 
+            val = unif_pdf(mu_0, ("interval", mu_tau, mu_b))
         if cond == "max":
-            # We want to compute P[mu_0 | mu_0 >= max(mu_b, mu_tau)]
-            if mu_tau >= mu_b + right_unif: # can get rid of this
-                return 0
-            if mu_0 <= max(mu_b, mu_tau):
-                return 0
-            val = 1 / (mu_b + right_unif - max(mu_b, mu_tau))
+            val = unif_pdf(mu_0, ("max", mu_tau, mu_b)) 
         
         participate, n_opt = get_best_response(inst_dict_copy, alpha)
-        assert participate
+        if not participate:
+            return 0
+
         pass_prob = get_pass_probability(inst_dict_copy, alpha, n_opt)
         if arg == "pass":
             return pass_prob*val
@@ -179,43 +217,42 @@ def get_loss(inst_dict, alpha):
     else:
         fp_part, err = integrate.quad(
             conditional_prob, 
-            mu_b-left_unif, 
-            mu_b+right_unif, 
+            left, 
+            right, 
             args=(mu_tau, "interval", "pass"),
             epsabs=1e-8, epsrel=1e-8
         )
-        total_fp = fp_part*(mu_b - max(mu_tau, mu_b - left_unif))/left_unif
-        approx_fp_part = alpha*(mu_b - max(mu_tau, mu_b - left_unif))/left_unif
+        total_fp = fp_part*(unif_cdf(mu_b) - unif_cdf(mu_tau))/unif_cdf(mu_b) 
+        approx_fp_part = alpha*(unif_cdf(mu_b) - unif_cdf(mu_tau))/unif_cdf(mu_b)
     
     # compute the fn conditional on participation
-    if mu_tau >= mu_b + right_unif:
+    if mu_tau >= right:
         fn_part = 0
         total_fn = 0
         approx_fn_part = 0
     else:
         fn_part, err = integrate.quad(
             conditional_prob,
-            mu_b-left_unif, 
-            mu_b+right_unif, 
+            left, 
+            right, 
             args=(mu_tau, "max", "fail"),
             epsabs=1e-8, epsrel=1e-8
         )
         approx_fn_part, err = integrate.quad(
             conditional_prob, 
-            mu_b-left_unif, 
-            mu_b+right_unif, 
+            left, 
+            right, 
             args=(mu_tau, "max", "pass"),
             epsabs=1e-8, epsrel=1e-8
         )  
-        total_fn = fn_part*(mu_b + right_unif - max(mu_b, min(mu_tau, mu_b+right_unif))) / right_unif
-        approx_fn_part *= (mu_b + right_unif - max(mu_b, min(mu_tau, mu_b+right_unif))) / right_unif   
-    
+        total_fn = fn_part*(1-unif_cdf(max(mu_tau, mu_b)))/(1 - unif_cdf(mu_b))
+        approx_fn_part *= (1-unif_cdf(max(mu_tau, mu_b)))/(1 - unif_cdf(mu_b)) 
+     
     # compute the worthy non-participation probabilities
     if mu_tau <= mu_b:
         worthy_part_loss = 0
     else:
-        worthy_part_loss = min(mu_tau, mu_b + right_unif) - mu_b
-        worthy_part_loss /= right_unif
+        worthy_part_loss = (unif_cdf(mu_tau) - unif_cdf(mu_b)) / (1 - unif_cdf(mu_b))
     
     loss = total_fp + total_fn + worthy_part_loss
     ret_dict = {
@@ -227,6 +264,7 @@ def get_loss(inst_dict, alpha):
         "total_fn" : total_fn,
         "worthy_part_loss" : worthy_part_loss,
     }
+    print(f"Computed loss for alpha: {alpha}")
     return ret_dict
 
 if __name__ == "__main__":

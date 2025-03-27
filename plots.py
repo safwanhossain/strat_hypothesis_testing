@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
-
+import json  # Import the json module
 from multiprocess import Pool
 
 from main import (
@@ -9,7 +9,8 @@ from main import (
     get_best_response,
     get_pass_probability,
     get_threshold_belief,
-    get_loss
+    get_loss,
+    get_alpha_star
 )
 
 def plot_exact_vs_estimate_pass_prob():
@@ -121,25 +122,25 @@ def plot_best_response():
     alpha_range = np.linspace(0.01, 0.1, 21)
     n_opts_alpha = []
     ut_opts_alpha = []
-    ut_opts_alpha_200 = []
+    pass_prob_opts_alpha = []
     for alpha in alpha_range:
         _, n_opt = get_best_response(inst_dict, alpha, verbose=False) 
         pass_prob = get_pass_probability(inst_dict, alpha, n_opt, verbose=False, exact=False)
         ut = get_utility(inst_dict, pass_prob, n_opt)
-        #ut_200 = get_utility(inst_dict, pass_prob, 200)
-        #print(f"Alpha: {alpha}, n_opt: {n_opt}, pass_prob: {pass_prob}, utility: {ut}")
+        pass_prob_opts_alpha.append(pass_prob)
         ut_opts_alpha.append(ut) 
-        #ut_opts_alpha_200.append(ut_200)
         n_opts_alpha.append(n_opt)
 
     # Vary effect for fixed alpha
     mu_range = np.linspace(0.5, 0.8, 21)
     n_opts_mu = []
     ut_opts_mu = []
+    pass_prob_opts_mu = []
     for mu in mu_range:
         inst_dict["mu_0"] = mu
         _, n_opt = get_best_response(inst_dict, 0.05, verbose=False)
         pass_prob = get_pass_probability(inst_dict, 0.05, n_opt, verbose=False, exact=False)
+        pass_prob_opts_mu.append(pass_prob)
         ut = get_utility(inst_dict, pass_prob, n_opt)
         ut_opts_mu.append(ut)  
         n_opts_mu.append(n_opt)
@@ -149,8 +150,8 @@ def plot_best_response():
 
     # Plot for varying alpha
     plt.subplot(1, 2, 1)
-    plt.plot(alpha_range, n_opts_alpha, color='red', label='Optimal n', marker='o')
-    plt.title('Optimal Sample Size vs Alpha (mu_0 = 0.6)')
+    plt.plot(alpha_range, pass_prob_opts_alpha, color='red', label='Pass Probability', marker='o')
+    plt.title('Pass Probability vs Alpha (mu_0 = 0.6)')
     plt.xlabel('Alpha')
     plt.ylabel('Optimal Sample Size (n)')
     plt.legend(loc='upper left')
@@ -239,7 +240,9 @@ def plot_loss():
     }
 
     # Vary alpha for fixed effect
-    alpha_range = np.linspace(0.001, 0.2, 6)
+    alpha_range = np.linspace(0.001, 0.2, 50)
+    alpha_star = get_alpha_star(inst_dict)
+
     fp_loss, fn_loss, worth_loss, cum_loss, approx_loss = [], [], [], [], []
     total_fp, total_fn = [], []
     
@@ -258,6 +261,7 @@ def plot_loss():
         cum_loss.append(loss_dict["loss"])
         approx_loss.append(loss_dict["approx_loss"]) 
 
+    # If you don't want to use multiprocessing
     # for alpha in tqdm(alpha_range):
     #     loss_dict = get_loss(inst_dict, alpha)
     #     fp_loss.append(loss_dict["fp_part"])
@@ -267,34 +271,54 @@ def plot_loss():
     #     worth_loss.append(loss_dict["worthy_part_loss"])
     #     cum_loss.append(loss_dict["loss"])
     #     approx_loss.append(loss_dict["approx_loss"])
+
+    # Save results to JSON
+    results_dict = {
+        "fp_loss": fp_loss,
+        "fn_loss": fn_loss,
+        "total_fp": total_fp,
+        "total_fn": total_fn,
+        "worth_loss": worth_loss,
+        "cum_loss": cum_loss,
+        "approx_loss": approx_loss
+    }
+    
+    with open('loss_results.json', 'w') as json_file:  # Specify the filename
+        json.dump(results_dict, json_file)  # Write the dictionary to the JSON file
     
     # Plotting
-    plt.figure(figsize=(20, 6))  # Adjusted figure size for two plots
+    plt.figure(figsize=(12, 6))  # Adjusted figure size for two plots
 
     # First plot for fp_loss, fn_loss, and worth_loss
-    plt.subplot(1, 3, 1)
+    plt.subplot(1, 2, 1)
     plt.plot(alpha_range, total_fp, color='blue', label='FP Loss')
     plt.plot(alpha_range, total_fn, color='orange', label='FN Loss')
     plt.plot(alpha_range, worth_loss, color='green', label='Worth Loss')
+    plt.axvline(x=alpha_star, color='black', linestyle='--', label='alpha*')
     plt.title('Loss Components vs Alpha')
     plt.xlabel('Alpha')
     plt.ylabel('Loss')
     plt.legend()
 
-    # First plot for fp_loss, fn_loss, and worth_loss
-    plt.subplot(1, 3, 2)
+    # Second plot for components of the false negative loss
+    plt.subplot(1, 2, 2)
     plt.plot(alpha_range, fn_loss, color='blue', label='Exact FN Loss')
-    plt.plot(alpha_range, np.array(total_fn)/np.array(fn_loss), color='green', label='P[mu_0 > mu_tau|mu_0 < mu_b]')
+    plt.plot(alpha_range, np.array(total_fn)/np.array(fn_loss), color='green', label='P[mu_0 > mu_tau|mu_0 > mu_b]')
     plt.plot(alpha_range, total_fn, color='orange', label='FN Loss * Prob')
+    plt.axvline(x=alpha_star, color='black', linestyle='--', label='alpha*')
     plt.title('FN Loss Components vs Alpha')
     plt.xlabel('Alpha')
     plt.ylabel('Loss')
     plt.legend()
 
+    plt.tight_layout()
+    plt.show()  # Display the plots
+
     # Second plot for cum_loss
-    plt.subplot(1, 3, 3)
+    plt.figure()  # Adjusted figure size for two plots
     plt.plot(alpha_range, cum_loss, color='red', label='Cumulative Loss')
     plt.plot(alpha_range, approx_loss, color='red', alpha=0.4, label='Cumulative Loss (Upper Bound)')
+    plt.axvline(x=alpha_star, color='black', linestyle='--', label='alpha*')
     plt.title('Cumulative Loss vs Alpha')
     plt.xlabel('Alpha')
     plt.ylabel('Cumulative Loss')
@@ -302,7 +326,7 @@ def plot_loss():
 
     plt.tight_layout()
     plt.show()  # Display the plots
+   
     
-
 if __name__ == "__main__":
     plot_loss()
