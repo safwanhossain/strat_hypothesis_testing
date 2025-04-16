@@ -3,14 +3,15 @@ import math
 from scipy import stats
 
 import scipy.integrate as integrate
+from scipy.stats import truncnorm
 import copy
 import matplotlib.pyplot as plt  # Add this import at the top
 
 # CONSTANTS
 VERBOSE = False
-R = 100
-A_0, A = 5, 0.25
+NMIN = 10
 NMAX = 300
+CONTINUITY_CONS = 0.5
 
 def get_utility(inst_dict, pass_prob, n):
     return pass_prob*inst_dict["r"] - (n*inst_dict["a"] + inst_dict["a_0"])
@@ -40,15 +41,14 @@ def get_p_value(inst_dict, n, verbose=False, exact=False):
     return est_p_value
 
 
-def get_pass_probability(inst_dict, alpha, n, verbose=False, exact=False):
+def get_pass_probability(inst_dict, alpha, n, verbose=False, exact=False, continuity_cons=CONTINUITY_CONS):
     # For a released p-value, compute the probability of passing when using n samples in the trial
     # This is the probability that the evidence be enough to reject the null hypothesis
     mu_b, mu_0 = inst_dict["mu_b"], inst_dict["mu_0"]
-    n = int(n)
-
     # Exact calculations  
     if exact:
         # First find the critical region, the set of observations that pass the p value
+        n = int(n)
         z_exact = n+1
         for z in range(1, n+1):
             run_sum = 0
@@ -67,7 +67,7 @@ def get_pass_probability(inst_dict, alpha, n, verbose=False, exact=False):
         return pass_prob_exact
 
     # Normal approximation to the binomial calculation
-    z_norm = n*mu_b + stats.norm.ppf(1-alpha, loc=0, scale=1)*np.sqrt(n*mu_b*(1-mu_b)) + 0.5
+    z_norm = n*mu_b + stats.norm.ppf(1-alpha, loc=0, scale=1)*np.sqrt(n*mu_b*(1-mu_b)) + CONTINUITY_CONS
     cdf_arg = (z_norm - n*mu_0)/np.sqrt(n*mu_0*(1-mu_0))
     pass_prob_norm = 1 - stats.norm.cdf(cdf_arg, loc=0, scale=1)
     
@@ -79,26 +79,39 @@ def get_pass_probability(inst_dict, alpha, n, verbose=False, exact=False):
 def get_best_response(inst_dict, alpha, verbose=False):
     """ Get the optimal number of samples and the whether the agent should participate or not in the trials.
     We are gonna stick to a quick and dirty linear search, although this can be done quickly in log(n) time
+    TODO: make this search over n continuous
     """
     mu_b, mu_0 = inst_dict["mu_b"], inst_dict["mu_0"]
-
-    ut_opt, n_opt = -1, 0
-    for i in range(1, NMAX):
+    ut_opt, n_opt = -1, NMIN
+    
+    for i in range(NMIN, NMAX):
         pass_prob = get_pass_probability(inst_dict, alpha, i, verbose=False, exact=False)
         utility = get_utility(inst_dict, pass_prob, i)
+        #print(f"samples: {i}, utility: {utility}")
         if utility >= 0 and utility > ut_opt:
             n_opt = i
             ut_opt = utility
 
-    if ut_opt < 0:
+    # do a more fine-grained search over the nearby region since n need not be an integer
+    #print(f"Before: N opt: {n_opt}, ut_opt: {ut_opt}")
+    if ut_opt > 0:
+        ut_opt_cont, n_opt_cont = -1, 0
+        n_space = np.linspace(n_opt-1, n_opt+1, 50)
+        for n_cont in n_space:
+            pass_prob_cont = get_pass_probability(inst_dict, alpha, n_cont, verbose=False, exact=False)
+            utility_cont = get_utility(inst_dict, pass_prob_cont, n_cont)
+            #print(f"\t {n_cont}: utility cont is: {utility_cont}")
+            if utility_cont >= 0 and utility_cont > ut_opt_cont:
+                n_opt_cont = n_cont
+                ut_opt_cont = utility_cont
         if verbose or VERBOSE:
-            print(f"Agent with effect size {mu_0 - mu_b} will not particiapte")
-        return False, 0
+            print(f"Agent with effect size {mu_0 - mu_b} will particiapte at optimal n: {n_opt} with utility: {ut_opt_cont}")
+        return True, n_opt_cont
     else:
         if verbose or VERBOSE:
-            print(f"Agent with effect size {mu_0 - mu_b} will particiapte at optimal n: {n_opt}")
-        return True, n_opt
-
+            print(f"Agent with effect size {mu_0 - mu_b} will not particiapte")
+        return False, -1
+    
 
 def get_threshold_belief(inst_dict, alpha, eps=0.005, verbose=False):
     """Get the threshold for a given baseline and p-value threshold
@@ -106,7 +119,7 @@ def get_threshold_belief(inst_dict, alpha, eps=0.005, verbose=False):
     # discretize the belief space
     beliefs = np.linspace(0, 1, int(1/eps) + 1)
 
-    # also just do a linear search for now
+    # run a binary search
     left, right = 0, len(beliefs)
     while left <= right:
         mid = left + math.ceil((right - left) // 2)
@@ -122,12 +135,41 @@ def get_threshold_belief(inst_dict, alpha, eps=0.005, verbose=False):
     threshold = beliefs[mid]
     inst_dict["mu_0"] = beliefs[mid]
     participate, n_tau = get_best_response(inst_dict, alpha)
+    assert participate
     pass_prob = get_pass_probability(inst_dict, alpha, n_tau, verbose=False)
     utility = get_utility(inst_dict, pass_prob, n_tau)
     if verbose or VERBOSE:
         print(f"The threshold belief is: {threshold}")
         print(f"The utility at threshold belief is: {utility}") 
     return threshold, n_tau
+
+def get_threshold_alpha(inst_dict, eps=0.005, verbose=False):
+    """Get the p-value under which a given agent will participate in the trials.
+    """
+    # discretize the alpha space
+    alphas = np.linspace(0, 1, int(1/eps) + 1)
+
+    # run a binary search
+    left, right = 0, len(alphas)
+    while left <= right:
+        mid = left + math.ceil((right - left) // 2)
+        participate, n = get_best_response(inst_dict, alphas[mid])
+        if left == right:
+            break
+        if not participate:
+            left = mid + 1
+        else:
+            right = mid
+   
+    threshold_alpha = alphas[mid]
+    participate, n_thres = get_best_response(inst_dict, threshold_alpha)
+    pass_prob = get_pass_probability(inst_dict, threshold_alpha, n_thres, verbose=False)
+    utility = get_utility(inst_dict, pass_prob, n_thres)
+    if verbose or VERBOSE:
+        print(f"The threshold alpha is: {threshold_alpha}")
+        print(f"The utility at threshold belief is: {utility}") 
+        print(f"The number of samples at threshold alpha is: {n_thres}")
+    return threshold_alpha, n_thres
 
 def get_alpha_star(inst_dict):
     """ Compute the value of alpha such that mu_tau(alpha) = mu_b. Since mu_tau decreases as 
@@ -153,7 +195,7 @@ def get_alpha_star(inst_dict):
     alpha_star = alphas[mid]
     return alpha_star
 
-def get_loss(inst_dict, alpha):
+def get_loss(inst_dict, alpha, pdf, cdf):
     """ Plot the total loss as a function of the p-value alpha
     """
     # We shall consider the belief distribution to uniform between 
@@ -161,40 +203,57 @@ def get_loss(inst_dict, alpha):
     mu_b = inst_dict["mu_b"] 
     left, right = 0.4, 0.7
 
-    def unif_cdf(mu_val):
-        return (min(mu_val, right) - left) / (right - left)
-
-    def unif_pdf(mu_0, cond=None):
-        if mu_0 <= left or mu_0 >= right:
-            return 0
-
-        if cond is None:
-            return 1 / (right - left) 
+   
         
-        if cond and cond[0] == "interval":
-            # compute P[mu_0 | left_int < mu_0 < right_int]
-            left_int, right_int = cond[1], cond[2]
-            if not left_int <= mu_0 <= right_int:
-                return 0
-            return 1 / (mu_b - max(left_int, left))
+    # def truc_gaussian_cdf(mu_val):
+    #     # Define the truncated normal distribution
+    #     # a and b are the lower and upper bounds (in standard deviations)
+    #     # mu is the mean, sigma is the standard deviation
+    #     left, right = 0.4, 0.7
+    #     sigma, mu = 1, 0.5
+    #     lower, upper = (left - mu) / sigma, (right - mu) / sigma  # Standardize bounds
+   
+    #     # Calculate the PDF and CDF for the truncated normal distribution
+    #     cdf = truncnorm.cdf(mu_val, lower, upper, loc=mu, scale=sigma)
+    #     return cdf
+
+    # def truc_gaussian_pdf(mu_0, cond=None):
+    #     left, right = 0.4, 0.7
+    #     sigma, mu = 1, 0.5
+    #     lower, upper = (left - mu) / sigma, (right - mu) / sigma  # Standardize bounds
+
+    #     if mu_0 <= left or mu_0 >= right:
+    #         return 0
+
+    #     if cond is None:
+    #         pdf = truncnorm.cdf(mu_0, lower, upper, loc=mu, scale=sigma)
         
-        if cond and cond[0] == "max":
-            # compute P[mu_0 | mu_0 >= max(val1, val2)]
-            max_val = max(cond[1], cond[2])
-            if max_val >= right or mu_0 <= max_val:
-                return 0
-            return 1 / (right - max_val)  
+    #     if cond and cond[0] == "interval":
+    #         # compute P[mu_0 | left_int < mu_0 < right_int]
+    #         left_int, right_int = cond[1], cond[2]
+    #         if not left_int <= mu_0 <= right_int:
+    #             return 0
+    #         pdf = truncnorm.cdf(mu_0, lower, upper, loc=mu, scale=sigma)
+    #         return pdf / (truc_gaussian_cdf(right_int) - truc_gaussian_cdf(left_int))
+           
+    #     if cond and cond[0] == "max":
+    #         # compute P[mu_0 | mu_0 >= max(val1, val2)]
+    #         max_val = max(cond[1], cond[2])
+    #         if max_val >= right or mu_0 <= max_val:
+    #             return 0
+    #         pdf = truncnorm.cdf(mu_0, lower, upper, loc=mu, scale=sigma)
+    #         return pdf / (1 - truc_gaussian_cdf(max_val))
 
     def conditional_prob(mu_0, mu_tau, cond, arg):
         inst_dict_copy = copy.deepcopy(inst_dict)
         inst_dict_copy["mu_0"] = mu_0
-        if unif_pdf(mu_0) == 0:
+        if pdf(mu_0) == 0:
             return 0
        
         if cond == "interval": 
-            val = unif_pdf(mu_0, ("interval", mu_tau, mu_b))
+            val = pdf(mu_0, ("interval", mu_tau, mu_b))
         if cond == "max":
-            val = unif_pdf(mu_0, ("max", mu_tau, mu_b)) 
+            val = pdf(mu_0, ("max", mu_tau, mu_b)) 
         
         participate, n_opt = get_best_response(inst_dict_copy, alpha)
         if not participate:
@@ -222,8 +281,8 @@ def get_loss(inst_dict, alpha):
             args=(mu_tau, "interval", "pass"),
             epsabs=1e-8, epsrel=1e-8
         )
-        total_fp = fp_part*(unif_cdf(mu_b) - unif_cdf(mu_tau))/unif_cdf(mu_b) 
-        approx_fp_part = alpha*(unif_cdf(mu_b) - unif_cdf(mu_tau))/unif_cdf(mu_b)
+        total_fp = fp_part*(cdf(mu_b) - cdf(mu_tau))/cdf(mu_b) 
+        approx_fp_part = alpha*(cdf(mu_b) - cdf(mu_tau))/cdf(mu_b)
     
     # compute the fn conditional on participation
     if mu_tau >= right:
@@ -245,14 +304,14 @@ def get_loss(inst_dict, alpha):
             args=(mu_tau, "max", "pass"),
             epsabs=1e-8, epsrel=1e-8
         )  
-        total_fn = fn_part*(1-unif_cdf(max(mu_tau, mu_b)))/(1 - unif_cdf(mu_b))
-        approx_fn_part *= (1-unif_cdf(max(mu_tau, mu_b)))/(1 - unif_cdf(mu_b)) 
+        total_fn = fn_part*(1-cdf(max(mu_tau, mu_b)))/(1 - cdf(mu_b))
+        approx_fn_part *= (1-cdf(max(mu_tau, mu_b)))/(1 - cdf(mu_b)) 
      
     # compute the worthy non-participation probabilities
     if mu_tau <= mu_b:
         worthy_part_loss = 0
     else:
-        worthy_part_loss = (unif_cdf(mu_tau) - unif_cdf(mu_b)) / (1 - unif_cdf(mu_b))
+        worthy_part_loss = (cdf(mu_tau) - cdf(mu_b)) / (1 - cdf(mu_b))
     
     loss = total_fp + total_fn + worthy_part_loss
     ret_dict = {
@@ -267,20 +326,40 @@ def get_loss(inst_dict, alpha):
     print(f"Computed loss for alpha: {alpha}")
     return ret_dict
 
+
+def pass_prob_deriv(inst_dict, alpha):
+    mu_b, mu_0 = inst_dict["mu_b"], inst_dict["mu_0"]
+    r, a = inst_dict["r"], inst_dict["a"]
+    sigma_b, sigma_0 = np.sqrt(mu_b*(1-mu_b)), np.sqrt(mu_0*(1-mu_0))
+    w_alpha = stats.norm.ppf(1-alpha)
+    delta_mu = mu_0 - mu_b
+    _, n_alpha = get_best_response(inst_dict, alpha, verbose=False)
+    if n_alpha == 0:
+        print(f"n(alpha) = 0 at alpha={alpha}")
+        return 0
+    zeta = w_alpha * sigma_b/sigma_0 - np.sqrt(n_alpha)*delta_mu/sigma_0
+    
+    first_term = sigma_b/sigma_0
+    second_term = stats.norm.pdf(zeta) / stats.norm.pdf(w_alpha)
+    third_term = 1 - (zeta*delta_mu)/(zeta*delta_mu - sigma_0/np.sqrt(n_alpha))
+    
+    return first_term*second_term*third_term
+
 if __name__ == "__main__":
     inst_dict = {
         "mu_b" : 0.5,
-        "mu_0" : 0.6,
+        "mu_0" : 0.37,
         "r" : 100,
         "a_0" : 5,
-        "a" : 0.25
+        "a" : 0.15
     }
     
-    alpha = 0.05
+    alpha = 0.25
     #get_p_value(inst_dict, 100, verbose=True)
     #get_pass_probability(inst_dict, 0.05, 50, verbose=True)
-    #get_best_response(inst_dict, alpha, verbose=True)
-    #get_threshold_belief(inst_dict, 0.05, eps=0.005, verbose=True)
-    get_loss(inst_dict, alpha)
+    get_best_response(inst_dict, alpha, verbose=True)
+    #get_threshold_belief(inst_dict, 0.25, eps=0.005, verbose=True)
+    #get_loss(inst_dict, alpha)
+    #get_threshold_alpha(inst_dict, eps=0.005, verbose=True)
 
 
